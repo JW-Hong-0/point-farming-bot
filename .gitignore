@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtualenv
+.venv/
+venv/
+
+# Logs and runtime
+*.log
+.bot.lock
+
+# Local env/secrets (must never be committed)
+.env
+.env.*
+*.env
+private/
+*.pem
+*.key
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
