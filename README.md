@@ -23,6 +23,9 @@
 - 동일 `ticker + pair`에서 과거 방향이 있었으면 그 방향 유지
   - 예: `BCH + (GRVT,HYNA)`가 `GRVT Long / HYNA Short`였다면
   - 이후 같은 pair 재진입 시 역방향(`GRVT Short / HYNA Long`) 금지
+- 수량/레버리지는 거래소 제약을 반영해 계산
+  - `qty_step`, `min_qty`, `min_notional`, `max_qty`를 양 거래소 동시 만족하도록 계산
+  - pair 레버리지는 `min(사용자설정, 거래소1 max_leverage, 거래소2 max_leverage)` 적용
 
 ## 경로
 - 프로젝트 루트: `Perp_DEX/bots/point_farming_bot`

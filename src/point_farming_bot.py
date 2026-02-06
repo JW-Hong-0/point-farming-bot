@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import random
 import time
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ class Assignment:
     long_venue: str
     short_venue: str
     qty: float
+    leverage: int
     opened_ts: float
 
 
@@ -42,7 +44,6 @@ class PointFarmingBot:
         self.paused = bool(Config.TRADING_START_PAUSED)
 
         # (ticker, pair_key) -> fixed long venue
-        # pair_key example: "GRVT|HYNA"
         self.direction_lock: Dict[Tuple[str, str], str] = {}
 
     async def initialize(self) -> None:
@@ -112,7 +113,6 @@ class PointFarmingBot:
 
     async def rotate_cycle(self) -> None:
         logger.info("cycle started")
-
         await self._ensure_direction_lock_from_assignments()
 
         closed = 0
@@ -136,11 +136,13 @@ class PointFarmingBot:
 
             kept += 1
             logger.info(
-                "keep %s pair=%s/%s age=%.2fh",
+                "keep %s pair=%s/%s age=%.2fh qty=%.8f lev=x%s",
                 assignment.ticker,
                 assignment.long_venue,
                 assignment.short_venue,
                 age_h,
+                assignment.qty,
+                assignment.leverage,
             )
 
         await self._open_new_assignments_to_target()
@@ -185,11 +187,16 @@ class PointFarmingBot:
                 else:
                     long_venue, short_venue = v2, v1
 
-            qty = await self._compute_common_qty(ticker, long_venue, short_venue)
+            lev = self._effective_leverage_for_pair(ticker, long_venue, short_venue)
+            if lev < 1:
+                logger.warning("%s skip %s/%s: leverage cap invalid", ticker, long_venue, short_venue)
+                continue
+
+            qty = await self._compute_common_qty(ticker, long_venue, short_venue, lev)
             if qty <= 0:
                 continue
 
-            ok = await self._open_pair(ticker, long_venue, short_venue, qty)
+            ok = await self._open_pair(ticker, long_venue, short_venue, qty, lev)
             if not ok:
                 continue
 
@@ -198,6 +205,7 @@ class PointFarmingBot:
                 long_venue=long_venue,
                 short_venue=short_venue,
                 qty=qty,
+                leverage=lev,
                 opened_ts=time.time(),
             )
             self._set_locked_long_venue(ticker, long_venue, short_venue, long_venue)
@@ -231,7 +239,7 @@ class PointFarmingBot:
         if not symbol:
             return False
 
-        qty = await self._adjust_qty_to_rules(ticker, venue, abs(signed_qty))
+        qty = await self._adjust_qty_to_rules(ticker, venue, abs(signed_qty), allow_below_min_qty=True)
         if qty <= 0:
             return False
 
@@ -244,14 +252,14 @@ class PointFarmingBot:
             return False
 
         try:
-            await ex.create_order(symbol, OrderType.MARKET, side, qty)
+            await ex.create_order(symbol, OrderType.MARKET, side, qty, params={"reduce_only": True})
             logger.info("closed %s %s %s qty=%s", ticker, venue, side.value, qty)
             return True
         except Exception as e:
             logger.error("close failed %s %s: %s", ticker, venue, e)
             return False
 
-    async def _open_pair(self, ticker: str, long_venue: str, short_venue: str, qty: float) -> bool:
+    async def _open_pair(self, ticker: str, long_venue: str, short_venue: str, qty: float, lev: int) -> bool:
         long_symbol = self._symbol_for_venue(ticker, long_venue)
         short_symbol = self._symbol_for_venue(ticker, short_venue)
         if not long_symbol or not short_symbol:
@@ -260,16 +268,17 @@ class PointFarmingBot:
         long_ex = self.exchanges[long_venue]
         short_ex = self.exchanges[short_venue]
 
-        await self._set_leverage_safe(long_venue, long_symbol, int(Config.TARGET_LEVERAGE))
-        await self._set_leverage_safe(short_venue, short_symbol, int(Config.TARGET_LEVERAGE))
+        await self._set_leverage_safe(long_venue, long_symbol, lev)
+        await self._set_leverage_safe(short_venue, short_symbol, lev)
 
         if Config.DRY_RUN:
             logger.info(
-                "[DRY_RUN] open %s long=%s short=%s qty=%.8f",
+                "[DRY_RUN] open %s long=%s short=%s qty=%.8f lev=x%s",
                 ticker,
                 long_venue,
                 short_venue,
                 qty,
+                lev,
             )
             return True
 
@@ -277,7 +286,14 @@ class PointFarmingBot:
         try:
             long_order = await long_ex.create_order(long_symbol, OrderType.MARKET, OrderSide.BUY, qty)
             await short_ex.create_order(short_symbol, OrderType.MARKET, OrderSide.SELL, qty)
-            logger.info("opened %s long=%s short=%s qty=%.8f", ticker, long_venue, short_venue, qty)
+            logger.info(
+                "opened %s long=%s short=%s qty=%.8f lev=x%s",
+                ticker,
+                long_venue,
+                short_venue,
+                qty,
+                lev,
+            )
             return True
         except Exception as e:
             logger.error("open failed %s (%s/%s): %s", ticker, long_venue, short_venue, e)
@@ -289,20 +305,63 @@ class PointFarmingBot:
                     logger.error("rollback failed on %s: %s", ticker, rollback_error)
             return False
 
-    async def _compute_common_qty(self, ticker: str, v1: str, v2: str) -> float:
+    async def _compute_common_qty(self, ticker: str, v1: str, v2: str, lev: int) -> float:
         p1 = await self._fetch_last_price(v1, ticker)
         p2 = await self._fetch_last_price(v2, ticker)
         if p1 <= 0 or p2 <= 0:
             return 0.0
 
-        notional_per_leg = float(Config.MARGIN_PER_LEG_USD) * max(1.0, float(Config.TARGET_LEVERAGE))
-        raw_qty = min(notional_per_leg / p1, notional_per_leg / p2)
+        rules1 = await self._get_market_rules(ticker, v1)
+        rules2 = await self._get_market_rules(ticker, v2)
 
-        q1 = await self._adjust_qty_to_rules(ticker, v1, raw_qty)
-        q2 = await self._adjust_qty_to_rules(ticker, v2, raw_qty)
-        qty = min(q1, q2)
+        min_qty_1 = float(rules1.get("min_qty") or 0.0)
+        min_qty_2 = float(rules2.get("min_qty") or 0.0)
+        min_notional_1 = float(rules1.get("min_notional") or 0.0)
+        min_notional_2 = float(rules2.get("min_notional") or 0.0)
+        step_1 = float(rules1.get("step_size") or min_qty_1 or 0.0)
+        step_2 = float(rules2.get("step_size") or min_qty_2 or 0.0)
 
+        margin = max(0.0, float(Config.MARGIN_PER_LEG_USD))
+        notional_per_leg = margin * max(1, int(lev))
+
+        qty_target_1 = notional_per_leg / p1
+        qty_target_2 = notional_per_leg / p2
+        qty_target = min(qty_target_1, qty_target_2)
+
+        qty_by_notional_1 = min_notional_1 / p1 if p1 > 0 else 0.0
+        qty_by_notional_2 = min_notional_2 / p2 if p2 > 0 else 0.0
+
+        global_min = max(min_qty_1, min_qty_2, qty_by_notional_1, qty_by_notional_2)
+        step_common = max(step_1, step_2, 0.0)
+
+        qty = max(qty_target, global_min)
+        qty = self._quantize_down(qty, step_common)
+        if qty < global_min:
+            qty += step_common if step_common > 0 else 0.0
+
+        max_qty_1 = rules1.get("max_qty")
+        max_qty_2 = rules2.get("max_qty")
+        cap = None
+        for value in (max_qty_1, max_qty_2):
+            if value is None:
+                continue
+            try:
+                v = float(value)
+            except (TypeError, ValueError):
+                continue
+            if v > 0:
+                cap = v if cap is None else min(cap, v)
+        if cap is not None:
+            qty = min(qty, cap)
+            qty = self._quantize_down(qty, step_common)
+
+        qty = await self._adjust_qty_to_rules(ticker, v1, qty)
+        qty = await self._adjust_qty_to_rules(ticker, v2, qty)
         if qty <= 0:
+            return 0.0
+
+        # Final notional check
+        if p1 * qty < min_notional_1 or p2 * qty < min_notional_2:
             return 0.0
         return qty
 
@@ -322,9 +381,6 @@ class PointFarmingBot:
     async def _fetch_signed_position_qty(self, venue: str, ticker: str) -> float:
         ex = self.exchanges.get(venue)
         if not ex:
-            return 0.0
-        symbol = self._symbol_for_venue(ticker, venue)
-        if not symbol:
             return 0.0
 
         try:
@@ -352,26 +408,90 @@ class PointFarmingBot:
         except Exception as e:
             logger.warning("set_leverage failed %s %s x%s: %s", venue, symbol, leverage, e)
 
-    async def _adjust_qty_to_rules(self, ticker: str, venue: str, qty: float) -> float:
+    def _effective_leverage_for_pair(self, ticker: str, v1: str, v2: str) -> int:
+        target = max(1, int(getattr(Config, "TARGET_LEVERAGE", 1)))
+        max1 = self._get_max_leverage(ticker, v1)
+        max2 = self._get_max_leverage(ticker, v2)
+
+        lev = min(target, int(math.floor(max1)), int(math.floor(max2)))
+        return max(1, lev)
+
+    def _get_max_leverage(self, ticker: str, venue: str) -> float:
+        symbol = self._symbol_for_venue(ticker, venue)
+        if not symbol:
+            return float(getattr(Config, "TARGET_LEVERAGE", 1))
+
+        ex = self.exchanges.get(venue)
+        if not ex:
+            return float(getattr(Config, "TARGET_LEVERAGE", 1))
+
+        market = getattr(ex, "markets", {}).get(symbol)
+        max_lev = getattr(market, "max_leverage", None) if market else None
+        try:
+            if max_lev and float(max_lev) > 0:
+                return float(max_lev)
+        except (TypeError, ValueError):
+            pass
+
+        return float(getattr(Config, "TARGET_LEVERAGE", 1))
+
+    async def _get_market_rules(self, ticker: str, venue: str) -> Dict:
+        symbol = self._symbol_for_venue(ticker, venue)
+        ex = self.exchanges.get(venue)
+        if not ex or not symbol:
+            return {}
+
+        market = getattr(ex, "markets", {}).get(symbol)
+        min_qty = float(getattr(market, "min_qty", 0.0) or 0.0) if market else 0.0
+        step_size = float(getattr(market, "qty_step", 0.0) or 0.0) if market else 0.0
+        min_notional = float(getattr(market, "min_notional", 0.0) or 0.0) if market else 0.0
+        max_qty = getattr(market, "max_qty", None) if market else None
+
+        if (not market or min_qty <= 0 or step_size <= 0) and hasattr(ex, "refresh_market_info"):
+            try:
+                refreshed = await ex.refresh_market_info(ticker)
+                if refreshed:
+                    min_qty = float(getattr(refreshed, "min_qty", min_qty) or min_qty)
+                    step_size = float(getattr(refreshed, "qty_step", step_size) or step_size)
+                    min_notional = float(getattr(refreshed, "min_notional", min_notional) or min_notional)
+                    max_qty = getattr(refreshed, "max_qty", max_qty)
+            except Exception:
+                pass
+
+        return {
+            "min_qty": min_qty,
+            "step_size": step_size,
+            "min_notional": min_notional,
+            "max_qty": max_qty,
+        }
+
+    async def _adjust_qty_to_rules(
+        self,
+        ticker: str,
+        venue: str,
+        qty: float,
+        allow_below_min_qty: bool = False,
+    ) -> float:
         if qty <= 0:
             return 0.0
 
-        symbol = self._symbol_for_venue(ticker, venue)
-        if not symbol:
-            return 0.0
+        rules = await self._get_market_rules(ticker, venue)
+        min_qty = float(rules.get("min_qty") or 0.0)
+        step = float(rules.get("step_size") or 0.0)
+        max_qty = rules.get("max_qty")
 
-        market: Optional[MarketInfo] = self.exchanges[venue].markets.get(symbol)
-        if not market:
-            return 0.0
+        qty = self._quantize_down(qty, step)
 
-        step = float(getattr(market, "qty_step", 0.0) or 0.0)
-        min_qty = float(getattr(market, "min_qty", 0.0) or 0.0)
+        if max_qty is not None:
+            try:
+                mq = float(max_qty)
+                if mq > 0:
+                    qty = min(qty, mq)
+                    qty = self._quantize_down(qty, step)
+            except (TypeError, ValueError):
+                pass
 
-        if step > 0:
-            inv = 1.0 / step
-            qty = int(qty * inv) / inv
-
-        if min_qty > 0 and qty < min_qty:
+        if not allow_below_min_qty and min_qty > 0 and qty < min_qty:
             return 0.0
 
         return max(0.0, qty)
@@ -410,6 +530,15 @@ class PointFarmingBot:
             if sep in s:
                 return s.split(sep, 1)[0]
         return s
+
+    @staticmethod
+    def _quantize_down(qty: float, step: float) -> float:
+        if qty <= 0:
+            return 0.0
+        if step <= 0:
+            return qty
+        inv = 1.0 / step
+        return math.floor(qty * inv) / inv
 
     @staticmethod
     def _random_rotation_interval_s() -> float:
