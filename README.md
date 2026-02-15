@@ -20,12 +20,17 @@
 2. 신규 진입 규칙
 - 이미 유지된 티커는 신규 진입 대상에서 제외
 - 목표 활성 티커 수(`POINT_TARGET_ACTIVE_TICKERS`)까지 비어 있는 슬롯만 신규 진입
+- 조합 강제 규칙(`POINT_ENFORCE_ALL_PAIR_TYPES=1`) 사용 시 3개 조합을 최소 1회씩 사용
+- 거래소 최소 레그 규칙(`POINT_EXCHANGE_MIN_LEGS=2`)으로 거래소별 최소 노출을 강제 시도
 - 동일 `ticker + pair`에서 과거 방향이 있었으면 그 방향 유지
   - 예: `BCH + (GRVT,HYNA)`가 `GRVT Long / HYNA Short`였다면
   - 이후 같은 pair 재진입 시 역방향(`GRVT Short / HYNA Long`) 금지
 - 수량/레버리지는 거래소 제약을 반영해 계산
   - `qty_step`, `min_qty`, `min_notional`, `max_qty`를 양 거래소 동시 만족하도록 계산
   - pair 레버리지는 `min(사용자설정, 거래소1 max_leverage, 거래소2 max_leverage)` 적용
+- 노셔널 규칙:
+  - 목표 노셔널: `POINT_TARGET_NOTIONAL_PER_LEG_USD` (기본 40)
+  - 상한 노셔널: `POINT_MAX_NOTIONAL_PER_LEG_USD` (기본 50)
 
 ## 경로
 - 프로젝트 루트: `Perp_DEX/bots/point_farming_bot`
@@ -50,10 +55,14 @@ cd /home/jeonguk/projects/Perp_DEX/bots/point_farming_bot
 포인트 파밍 전용 키:
 - `POINT_SYMBOLS=AVNT,IP,BERA,RESOLV,ADA,BCH,SOL,XRP,DOGE,LINK`
 - `POINT_TARGET_ACTIVE_TICKERS=3`
+- `POINT_ENFORCE_ALL_PAIR_TYPES=1`
+- `POINT_EXCHANGE_MIN_LEGS=2`
 - `POINT_RETAIN_PROBABILITY=0.5`
 - `POINT_MAX_HOLD_HOURS=36`
-- `POINT_TARGET_LEVERAGE=3`
-- `POINT_MARGIN_PER_LEG_USD=20`
+- `POINT_TARGET_LEVERAGE=5`
+- `POINT_TARGET_NOTIONAL_PER_LEG_USD=40`
+- `POINT_MAX_NOTIONAL_PER_LEG_USD=50`
+- `POINT_MARGIN_PER_LEG_USD=20`  # 호환용(현재 포지션 산정은 target_notional 기준)
 - `POINT_ROTATION_MIN_HOURS=4`
 - `POINT_ROTATION_MAX_HOURS=8`
 - `POINT_LOOP_INTERVAL_S=3`
@@ -61,9 +70,29 @@ cd /home/jeonguk/projects/Perp_DEX/bots/point_farming_bot
 - `POINT_DRY_RUN=1`
 - `TRADING_START_PAUSED=1`
 - `POINT_RANDOM_SEED=123` (선택)
+- `POINT_SESSION_LOG_DIR=/path/to/logs` (선택)
 
 ## 운영 순서 권장
 1. `POINT_DRY_RUN=1`, `TRADING_START_PAUSED=1`로 시작
 2. 심볼/페어 가용성 로그 확인
 3. `TRADING_START_PAUSED=0`으로 사이클 동작 확인
 4. 이상 없으면 `POINT_DRY_RUN=0`으로 실거래 전환
+
+## 주문/체크 정책
+- 진입/청산은 전 거래소 `MARKET` 주문 사용
+- 진입 전 가용 자산(available) 기반으로 필요한 증거금(`notional/leverage`)을 검사
+
+## 로그 산출물
+- 실행 로그: `session_xxx/point_farming_bot_<pid>.log`
+- 에러 로그: `session_xxx/errors.log`
+- 거래 이력 CSV: `session_xxx/trades.csv`
+- 사이클별 페어 이력 CSV: `session_xxx/cycle_pairs.csv`
+- 사이클별 거래소 요약 CSV: `session_xxx/cycle_exchange.csv`
+- 종료 시 XLSX: `session_xxx/session.xlsx`
+
+## 대시보드
+- 기본값으로 콘솔 대시보드 활성화(`POINT_DASHBOARD_ENABLED=1`)
+- 표시 항목:
+  - 현재 사이클 / 다음 로테이션까지 남은 시간
+  - 거래소별 자산(전체, 가용)
+  - 현재 헷징 페어 목록(티커, long/short 거래소, qty, leverage, 보유시간)

@@ -42,14 +42,16 @@ else:
     here = Path(__file__).resolve()
     bot_root = here.parent.parent
     perp_root = bot_root.parent.parent
-    default_env = perp_root / "private" / "Funding_Arbitrage.env"
-    fallback_env = bot_root / "private" / "Funding_Arbitrage.env"
-    if default_env.exists():
-        _load_env_file(default_env)
-        os.environ.setdefault("BOT_ENV_PATH", str(default_env))
-    else:
-        _load_env_file(fallback_env)
-        os.environ.setdefault("BOT_ENV_PATH", str(fallback_env))
+    candidates = [
+        bot_root / "secret" / "Funding_Arbitrage.env",
+        perp_root / "private" / "Funding_Arbitrage.env",
+        bot_root / "private" / "Funding_Arbitrage.env",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            _load_env_file(candidate)
+            os.environ.setdefault("BOT_ENV_PATH", str(candidate))
+            break
 
 
 class Config:
@@ -87,20 +89,34 @@ class Config:
 
     POINT_SYMBOLS = [
         s.strip().upper()
-        for s in os.getenv("POINT_SYMBOLS", "AVNT,IP,BERA,RESOLV").split(",")
+        for s in os.getenv("POINT_SYMBOLS", "ENA,FARTCOIN,HYPE,LINK,LTC,SUI,XPL,ZEC,XMR,IP").split(",")
         if s.strip()
     ]
+    ENFORCE_ALL_PAIR_TYPES = _to_bool(os.getenv("POINT_ENFORCE_ALL_PAIR_TYPES"), True)
+    EXCHANGE_MIN_LEGS = _to_int(os.getenv("POINT_EXCHANGE_MIN_LEGS"), 2)
     TARGET_ACTIVE_TICKERS = _to_int(os.getenv("POINT_TARGET_ACTIVE_TICKERS"), 3)
-    RETAIN_PROBABILITY = _to_float(os.getenv("POINT_RETAIN_PROBABILITY"), 0.5)
+    RETAIN_PROBABILITY = _to_float(os.getenv("POINT_RETAIN_PROBABILITY"), 0.55)
     MAX_HOLD_HOURS = _to_float(os.getenv("POINT_MAX_HOLD_HOURS"), 36.0)
-    TARGET_LEVERAGE = _to_int(os.getenv("POINT_TARGET_LEVERAGE"), 3)
+    TARGET_LEVERAGE = _to_int(os.getenv("POINT_TARGET_LEVERAGE"), 5)
+    ENFORCE_LEVERAGE_MATCH = _to_bool(os.getenv("POINT_ENFORCE_LEVERAGE_MATCH"), True)
+    LEVERAGE_VERIFY_RETRIES = _to_int(os.getenv("POINT_LEVERAGE_VERIFY_RETRIES"), 4)
+    LEVERAGE_VERIFY_INTERVAL_S = _to_float(os.getenv("POINT_LEVERAGE_VERIFY_INTERVAL_S"), 0.6)
+    LEVERAGE_TOLERANCE = _to_float(os.getenv("POINT_LEVERAGE_TOLERANCE"), 0.2)
+    TARGET_NOTIONAL_PER_LEG_USD = _to_float(os.getenv("POINT_TARGET_NOTIONAL_PER_LEG_USD"), 40.0)
+    MAX_NOTIONAL_PER_LEG_USD = _to_float(os.getenv("POINT_MAX_NOTIONAL_PER_LEG_USD"), 50.0)
     MARGIN_PER_LEG_USD = _to_float(os.getenv("POINT_MARGIN_PER_LEG_USD"), 20.0)
-    ROTATION_MIN_HOURS = _to_float(os.getenv("POINT_ROTATION_MIN_HOURS"), 4.0)
-    ROTATION_MAX_HOURS = _to_float(os.getenv("POINT_ROTATION_MAX_HOURS"), 8.0)
+    ROTATION_MIN_HOURS = _to_float(os.getenv("POINT_ROTATION_MIN_HOURS"), 1.0)
+    ROTATION_MAX_HOURS = _to_float(os.getenv("POINT_ROTATION_MAX_HOURS"), 2.0)
     LOOP_INTERVAL_S = _to_float(os.getenv("POINT_LOOP_INTERVAL_S"), 3.0)
+    HEDGE_AUDIT_INTERVAL_S = _to_float(os.getenv("POINT_HEDGE_AUDIT_INTERVAL_S"), 15.0)
+    HEDGE_QTY_TOLERANCE = _to_float(os.getenv("POINT_HEDGE_QTY_TOLERANCE"), 0.02)
+    CLOSE_RETRY_MAX = _to_int(os.getenv("POINT_CLOSE_RETRY_MAX"), 3)
     TRADING_START_PAUSED = _to_bool(os.getenv("TRADING_START_PAUSED"), True)
     DRY_RUN = _to_bool(os.getenv("POINT_DRY_RUN"), True)
     RANDOM_SEED = os.getenv("POINT_RANDOM_SEED")
+    DASHBOARD_ENABLED = _to_bool(os.getenv("POINT_DASHBOARD_ENABLED"), True)
+    DASHBOARD_REFRESH_S = _to_float(os.getenv("POINT_DASHBOARD_REFRESH_S"), 1.0)
+    SESSION_LOG_DIR = os.getenv("POINT_SESSION_LOG_DIR", "")
 
     LOG_LEVEL = os.getenv("POINT_LOG_LEVEL", "INFO")
 
